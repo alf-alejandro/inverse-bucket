@@ -914,4 +914,4 @@ if __name__ == "__main__":
         roi   = (bt["capital"] - CAPITAL_TOTAL) / CAPITAL_TOTAL * 100
         log.info(f"Capital final: ${bt['capital']:.4f}  (ROI: {roi:+.2f}%)")
         log.info(f"P&L total: ${bt['total_pnl']:+.4f}")
-        log.info(f"Trades: {total}  (WIN: {bt['wins']}  LOSS: {bt['losses']})")v
+        log.info(f"Trades: {total}  (WIN: {bt['wins']}  LOSS: {bt['losses']})")
