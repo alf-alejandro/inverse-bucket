@@ -32,10 +32,15 @@ import threading
 from collections import deque
 from datetime import datetime
 
-from strategy_core import (
+from strategy_core_prod import (
     find_active_market,
     get_order_book_metrics,
     seconds_remaining,
+    place_taker_buy,
+    place_taker_sell,
+    approve_conditional_token,
+    get_clob_balance,
+    get_usdc_balance,
 )
 
 logging.basicConfig(
@@ -76,6 +81,11 @@ MID_HISTORY_SIZE      = 3
 LOG_FILE   = os.environ.get("LOG_FILE",   "/data/reversal_log.json")
 CSV_FILE   = os.environ.get("CSV_FILE",   "/data/reversal_trades.csv")
 STATE_FILE = os.environ.get("STATE_FILE", "/data/reversal_state.json")
+
+# Credenciales — requeridas en producción
+# POLYMARKET_KEY   → clave privada hex de la wallet
+# PROXY_ADDRESS    → dirección proxy en Polymarket
+# POLY_CHAIN_ID    → 137 (Polygon mainnet, default)
 
 # ═══════════════════════════════════════════════════════
 #  ESTADO
@@ -264,6 +274,16 @@ def write_state():
 # ═══════════════════════════════════════════════════════
 #  RESTAURAR ESTADO DESDE CSV
 # ═══════════════════════════════════════════════════════
+
+def sincronizar_capital_clob():
+    """Sincroniza el capital con el saldo USDC real del CLOB al arrancar."""
+    balance = get_usdc_balance()
+    if balance is not None and balance > 0:
+        bt["capital"] = round(balance, 4)
+        log_event(f"Capital sincronizado desde CLOB: ${bt['capital']:.4f}")
+    else:
+        log_event("No se pudo leer saldo CLOB — usando capital del CSV o default")
+
 
 def restore_state_from_csv():
     if not os.path.isfile(CSV_FILE):
@@ -494,26 +514,43 @@ def check_entry():
         log_event(f"SKIP — capital insuficiente (${bt['capital']:.2f} < ${ENTRY_USD:.2f})")
         return
 
-    shares         = round(ENTRY_USD / entry_ask, 6)
+    shares_req     = round(ENTRY_USD / entry_ask, 2)
     secs           = min_secs_remaining() or 0
     peers          = [s for s in SYMBOLS if s != sym]
     peer_snaps     = {p: {"up_mid": markets[p]["up_mid"], "dn_mid": markets[p]["dn_mid"]} for p in peers}
     harm_entry     = bt["harm_up"] if gap_side == "UP" else bt["harm_dn"]
     gap_entry      = bt["signal_div"]
     capital_before = bt["capital"]
+    token_id       = markets[sym]["info"]["up_token_id"] if gap_side == "UP" else markets[sym]["info"]["down_token_id"]
 
-    bt["capital"]           -= ENTRY_USD
+    # ── COMPRA REAL ───────────────────────────────────────────────────────
+    log_event(f"COMPRANDO {gap_side} {sym} @ ask={entry_ask:.4f} | {shares_req} shares...")
+    result = place_taker_buy(token_id, shares_req, entry_ask)
+
+    if not result["success"] or result["shares_filled"] < shares_req * 0.5:
+        log_event(f"FALLO compra {gap_side} {sym}: {result['error']}")
+        return
+
+    shares_filled = result["shares_filled"]
+    fill_price    = result.get("fill_price", entry_ask)
+    usd_spent     = round(shares_filled * fill_price, 4)
+
+    # Pre-aprobar token para poder vender en stop loss
+    approve_conditional_token(token_id)
+
+    bt["capital"]           -= usd_spent
     bt["traded_this_cycle"]  = True
 
     bt["position"] = {
         "asset":            sym,
-        "side":             gap_side,    # el lado barato que compramos
+        "side":             gap_side,
         "gap_side":         gap_side,
-        "entry_price":      entry_ask,
+        "token_id":         token_id,
+        "entry_price":      fill_price,
         "entry_bid":        entry_bid,
         "entry_mid":        entry_mid,
-        "entry_usd":        ENTRY_USD,
-        "shares":           shares,
+        "entry_usd":        usd_spent,
+        "shares":           shares_filled,
         "secs_left_entry":  secs,
         "harm_entry":       harm_entry,
         "gap_entry":        gap_entry,
@@ -521,12 +558,13 @@ def check_entry():
         "consensus_entry":  bt["consensus"],
         "peer_snaps":       peer_snaps,
         "capital_before":   capital_before,
+        "salida_pendiente": False,
     }
 
     log_event(
-        f"REVERSAL {gap_side} {sym} @ ask={entry_ask:.4f} | "
+        f"REVERSAL {gap_side} {sym} @ fill={fill_price:.4f} | "
         f"gap={gap_entry*100:+.1f}bp (>{REVERSAL_THRESHOLD*100:.1f}bp) | "
-        f"harm={harm_entry:.4f} | shares={shares:.4f} | "
+        f"harm={harm_entry:.4f} | shares={shares_filled} | "
         f"capital=${bt['capital']:.2f}"
     )
     write_state()
@@ -540,19 +578,42 @@ def check_stop_loss():
     pos = bt["position"]
     if not pos:
         return
-    sym  = pos["asset"]
-    side = pos["side"]
-    bid  = markets[sym]["up_bid"] if side == "UP" else markets[sym]["dn_bid"]
-    if bid <= STOP_LOSS_PRICE and bid > 0:
-        pnl = round(pos["shares"] * bid - ENTRY_USD, 6)
-        bt["capital"]   += ENTRY_USD + pnl
-        bt["total_pnl"] += pnl
-        bt["losses"]    += 1
-        update_drawdown()
-        log_event(f"STOP LOSS {side} {sym} @ bid={bid:.4f} | PnL=${pnl:+.4f}")
-        _record_trade_sl(pos, bid, pnl)
-        bt["position"] = None
+
+    sym      = pos["asset"]
+    side     = pos["side"]
+    token_id = pos["token_id"]
+    bid      = markets[sym]["up_bid"] if side == "UP" else markets[sym]["dn_bid"]
+
+    # Reintentar salida pendiente de ciclo anterior
+    if pos.get("salida_pendiente") and bid > 0:
+        log_event(f"Reintentando salida pendiente {side} {sym}...")
+    elif bid > STOP_LOSS_PRICE or bid <= 0:
+        return
+
+    # Verificar balance real en CLOB antes de vender
+    clob_bal = get_clob_balance(token_id)
+    shares_a_vender = clob_bal if clob_bal > 0 else pos["shares"]
+
+    log_event(f"STOP LOSS {side} {sym} @ bid={bid:.4f} | vendiendo {shares_a_vender} shares...")
+    approve_conditional_token(token_id)
+    result = place_taker_sell(token_id, shares_a_vender, bid)
+
+    if not result["success"]:
+        log_event(f"FALLO venta SL {side} {sym}: {result['error']} — reintentando próximo ciclo")
+        pos["salida_pendiente"] = True
         write_state()
+        return
+
+    fill_price = result.get("fill_price") or bid
+    pnl        = round(shares_a_vender * fill_price - pos["entry_usd"], 6)
+    bt["capital"]   += pos["entry_usd"] + pnl
+    bt["total_pnl"] += pnl
+    bt["losses"]    += 1
+    update_drawdown()
+    log_event(f"STOP LOSS ejecutado {side} {sym} @ {fill_price:.4f} | PnL=${pnl:+.4f}")
+    _record_trade_sl(pos, fill_price, pnl)
+    bt["position"] = None
+    write_state()
 
 
 # ═══════════════════════════════════════════════════════
@@ -563,19 +624,29 @@ def _apply_resolution(pos, resolved):
     sym  = pos["asset"]
     side = pos["side"]
     if resolved == side:
-        pnl     = round((pos["shares"] - 1) * ENTRY_USD, 6)
+        # Ganamos — Polymarket auto-redime shares → 1 USDC cada una
+        pnl     = round(pos["shares"] - pos["entry_usd"], 6)
         outcome = "WIN"
         bt["wins"] += 1
     else:
-        pnl     = -ENTRY_USD
+        pnl     = -pos["entry_usd"]
         outcome = "LOSS"
         bt["losses"] += 1
-    bt["capital"]   += ENTRY_USD + pnl
-    bt["total_pnl"] += pnl
+
+    # Sincronizar capital real desde CLOB (el redeem ya habrá ocurrido)
+    time.sleep(2.0)
+    balance_real = get_usdc_balance()
+    if balance_real is not None and balance_real > 0:
+        bt["capital"]   = round(balance_real, 4)
+        bt["total_pnl"] = round(bt["capital"] - CAPITAL_TOTAL, 4)
+    else:
+        bt["capital"]   += pos["entry_usd"] + pnl
+        bt["total_pnl"] += pnl
+
     update_drawdown()
     log_event(
         f"RESOLUCIÓN {outcome} {side} {sym} → {resolved} | "
-        f"PnL=${pnl:+.4f} | Capital=${bt['capital']:.4f}"
+        f"PnL≈${pnl:+.4f} | Capital=${bt['capital']:.4f}"
     )
     _record_trade(pos, resolved, outcome, pnl)
     write_state()
@@ -737,6 +808,7 @@ async def main_loop():
     log_event(f"Umbral reversión: >{REVERSAL_THRESHOLD*100:.1f}bp | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
 
     restore_state_from_csv()
+    sincronizar_capital_clob()
 
     bt["phase"] = "ACTIVO"
     write_state()
