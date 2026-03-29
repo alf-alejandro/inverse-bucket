@@ -62,7 +62,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # ═══════════════════════════════════════════════════════
 #  PARÁMETROS
 # ═══════════════════════════════════════════════════════
-POLL_INTERVAL         = 0.5
+POLL_INTERVAL         = 0.2
 REVERSAL_THRESHOLD    = 0.115   # 11.5 bp — gap mínimo para entrada contrarian
 WAKE_UP_SECS          = 90
 ENTRY_WINDOW_SECS     = 85
