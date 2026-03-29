@@ -670,8 +670,8 @@ def check_resolution():
     if markets[sym]["info"] is None:
         resolved = resolve_from_clob_history(sym)
         if resolved == "_UNKNOWN":
-            pnl = -ENTRY_USD
-            bt["capital"]   += ENTRY_USD + pnl
+            pnl = -pos["entry_usd"]
+            bt["capital"]   += pos["entry_usd"] + pnl
             bt["total_pnl"] += pnl
             bt["losses"]    += 1
             update_drawdown()
@@ -698,7 +698,7 @@ def _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl):
 
     def peer_mids(p):
         snap = peer_snaps.get(p, {})
-        side = pos["side"]
+        side = pos.get("gap_side", pos["side"])  # referencia del gap, no del reversal
         if side == "UP":
             return snap.get("up_mid", 0.0), snap.get("dn_mid", 0.0)
         return snap.get("dn_mid", 0.0), snap.get("up_mid", 0.0)
