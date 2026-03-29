@@ -140,11 +140,17 @@ class MarketDataWS:
             return token_id in self._books
 
     def _connect(self, token_ids: list):
-        if self._ws:
+        # Nullify before closing so _on_close on the old ws doesn't trigger reconnect
+        old_ws = self._ws
+        self._ws = None
+        if old_ws:
             try:
-                self._ws.close()
+                old_ws.close()
             except Exception:
                 pass
+
+        if not self._active:
+            return
 
         self._connected.clear()
 
@@ -153,7 +159,7 @@ class MarketDataWS:
             on_open    = lambda ws: self._on_open(ws, token_ids),
             on_message = self._on_message,
             on_error   = lambda ws, e: log.warning(f"MarketWS error: {e}"),
-            on_close   = lambda ws, *a: self._on_close(),
+            on_close   = lambda ws, *a: self._on_close(ws),
         )
         self._ws = ws
         self._thread = threading.Thread(
@@ -181,7 +187,10 @@ class MarketDataWS:
         except Exception as e:
             log.debug(f"MarketWS parse: {e}")
 
-    def _on_close(self):
+    def _on_close(self, closed_ws=None):
+        # Ignore stale close callbacks from replaced connections
+        if closed_ws is not None and closed_ws is not self._ws:
+            return
         if self._active and self._subscribed:
             log.warning("MarketWS desconectado — reconectando en 2s...")
             time.sleep(2)
