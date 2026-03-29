@@ -1,6 +1,7 @@
 [build]
 builder = "nixpacks"
 
-# Crear dos servicios en Railway desde este mismo repo:
-# Servicio 1 (bot):       python basket_reversal.py
-# Servicio 2 (dashboard): gunicorn dashboard:app --bind 0.0.0.0:$PORT
+[deploy]
+startCommand = "python basket_reversal.py"
+healthcheckPath = "/"
+healthcheckTimeout = 30
