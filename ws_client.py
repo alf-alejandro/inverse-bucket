@@ -5,7 +5,9 @@ Dos componentes:
   FillWatcher   — detecta el fill de una orden específica en <100ms
   MarketDataWS  — suscripción continua al order book en tiempo real
 
-Endpoint: wss://ws-subscriptions-clob.polymarket.com/ws/
+Endpoints:
+  wss://ws-subscriptions-clob.polymarket.com/ws/market  — order book / price feed
+  wss://ws-subscriptions-clob.polymarket.com/ws/user    — fills / user orders
 """
 
 import json
@@ -17,7 +19,8 @@ import websocket
 
 log = logging.getLogger("ws_client")
 
-WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+WS_USER_URL   = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
 
 # ── FillWatcher ───────────────────────────────────────────────────────────────
@@ -45,7 +48,7 @@ class FillWatcher:
 
     def wait(self) -> dict:
         ws = websocket.WebSocketApp(
-            WS_URL,
+            WS_USER_URL,
             on_open    = self._on_open,
             on_message = self._on_message,
             on_error   = lambda ws, e: log.debug(f"FillWS error: {e}"),
@@ -146,7 +149,7 @@ class MarketDataWS:
         self._connected.clear()
 
         ws = websocket.WebSocketApp(
-            WS_URL,
+            WS_MARKET_URL,
             on_open    = lambda ws: self._on_open(ws, token_ids),
             on_message = self._on_message,
             on_error   = lambda ws, e: log.warning(f"MarketWS error: {e}"),
