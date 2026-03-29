@@ -4,23 +4,25 @@ basket_reversal.py — Estrategia Fade Armónica v2  (Opción B)
 LÓGICA:
   Cuando el gap de un activo supera 11.5 bp respecto a la media armónica de
   sus pares, el precio se ha sobre-extendido. La estrategia original (basket.py)
-  compra el lado barato esperando que siga — pero en esa zona el win rate cae
-  al ~60%. Apostamos al lado CONTRARIO (fade): si UP de SOL está muy bajo,
-  compramos DOWN, apostando a que el mercado que empujó ese lado tenía razón.
+  compra el lado barato (~0.70) esperando que siga — pero en esa zona el win
+  rate cae al ~60%. Apostamos al lado CONTRARIO (fade): si UP de SOL está muy
+  bajo (0.70), DOWN de SOL cotiza ~0.30. Compramos DOWN a 0.30 — si resuelve
+  DOWN, cobramos 1/0.30 = +2.32x por cada $1 apostado.
 
   Ejemplo: UP de SOL cae 12 bp por debajo de la media armónica (gap en UP) →
-           el mercado está sobrevendiendo UP y favorece DOWN →
-           compramos DOWN de SOL (el lado favorecido por el mercado).
+           UP cotiza ~0.70, DOWN cotiza ~0.30 →
+           compramos DOWN a ~0.30 apostando a que el mercado sobre-extendió UP.
 
   Backtest 3306 trades reales (31 días):
-    gap >= 11.5 bp → 746 trades | WR=39.3% | payout 2.32x | EV +$0.305/trade
-    Z-score 5.47 → confianza 99.9% | out-of-sample WR=41.1% (sin overfitting)
+    gap >= 11.5 bp → 746 trades | WR=39.3% | payout ~2.32x | EV +$0.305/trade
+    PnL total ($1.75/trade): ~$227 | Z-score 5.47 → confianza 99.9%
+    out-of-sample WR=41.1% (sin overfitting)
 
 DIFERENCIAS vs basket.py (v5):
   - Solo entra cuando gap > REVERSAL_THRESHOLD = 0.115 (11.5 bp)
   - Sin DIVERGENCE_MAX — cualquier gap > 11.5 bp es válido
-  - Entra al lado CONTRARIO al gap (reversal_side, opuesto a signal_side)
-  - ENTRY_MIN_PRICE = 0.55 — el lado contrario suele cotizar entre 0.55–0.85
+  - Entra al lado CONTRARIO al gap: signal_side=UP → compra DOWN (~0.30)
+  - ENTRY_MAX_PRICE = 0.40 — filtra entradas donde el payout sería bajo
   - ENTRY_USD = $1.75 fijo
   - Consenso SOFT: al menos 1 par confirma el sesgo del gap
 """
@@ -77,7 +79,7 @@ RESOLVED_DN_THRESH    = 0.02
 CONSENSUS_REQUIRED    = "SOFT"
 CONSENSUS_SOFT        = 0.55    # umbral para contar un par como "del mismo lado"
 
-ENTRY_MIN_PRICE       = 0.55    # el lado contrario (caro) debería estar entre 0.55–0.85
+ENTRY_MAX_PRICE       = 0.40    # el lado contrario (favorecido) cotiza ~0.25–0.35 cuando gap > 11.5 bp
 STOP_LOSS_PRICE       = 0.33
 
 MID_HISTORY_SIZE      = 3
@@ -506,8 +508,8 @@ def check_entry():
         bt["skipped"] += 1
         return
 
-    if entry_ask < ENTRY_MIN_PRICE:
-        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} bajo mínimo {ENTRY_MIN_PRICE}")
+    if entry_ask > ENTRY_MAX_PRICE:
+        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} supera máximo {ENTRY_MAX_PRICE} (gap insuficiente para payout)")
         bt["skipped"] += 1
         return
 
@@ -895,7 +897,7 @@ def run_dashboard():
 if __name__ == "__main__":
     log.info("=" * 58)
     log.info("  BASKET REVERSAL — REVERSIÓN ARMÓNICA  v1")
-    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (≥5 shares hasta ask {ENTRY_MAX_PRICE})")
+    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (ask <= {ENTRY_MAX_PRICE}, payout ~2.3x)")
     log.info(f"  Umbral: >{REVERSAL_THRESHOLD*100:.1f}bp  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
     log.info("  SIMULACION — SIN DINERO REAL")
     log.info("=" * 58)
@@ -912,4 +914,4 @@ if __name__ == "__main__":
         roi   = (bt["capital"] - CAPITAL_TOTAL) / CAPITAL_TOTAL * 100
         log.info(f"Capital final: ${bt['capital']:.4f}  (ROI: {roi:+.2f}%)")
         log.info(f"P&L total: ${bt['total_pnl']:+.4f}")
-        log.info(f"Trades: {total}  (WIN: {bt['wins']}  LOSS: {bt['losses']})")
+        log.info(f"Trades: {total}  (WIN: {bt['wins']}  LOSS: {bt['losses']})")v
