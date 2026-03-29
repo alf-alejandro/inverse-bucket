@@ -73,7 +73,7 @@ RESOLVED_DN_THRESH    = 0.02
 CONSENSUS_REQUIRED    = "SOFT"
 CONSENSUS_SOFT        = 0.55    # umbral para contar un par como "del mismo lado"
 
-ENTRY_MAX_PRICE       = 0.35    # el lado barato no debería superar 0.35 (≥5 shares con $1.75)
+ENTRY_MIN_PRICE       = 0.55    # el lado contrario (caro) debería estar entre 0.55–0.85
 STOP_LOSS_PRICE       = 0.33
 
 MID_HISTORY_SIZE      = 3
@@ -425,13 +425,13 @@ def compute_signals():
     # El gap más grande (en valor absoluto) gana
     if abs(div_up) >= abs(div_dn) and ext_up:
         bt["signal_asset"]  = ext_up
-        bt["signal_side"]   = "UP"   # lado sobre-extendido y barato → compramos este
-        bt["reversal_side"] = "UP"   # entramos el lado barato (contrario al mercado)
+        bt["signal_side"]   = "UP"    # lado sobre-extendido (barato)
+        bt["reversal_side"] = "DOWN"  # apostamos al lado contrario (caro, favorecido)
         bt["signal_div"]    = div_up
     elif ext_dn:
         bt["signal_asset"]  = ext_dn
         bt["signal_side"]   = "DOWN"
-        bt["reversal_side"] = "DOWN" # ídem
+        bt["reversal_side"] = "UP"    # ídem
         bt["signal_div"]    = div_dn
     else:
         bt["signal_asset"] = None
@@ -477,10 +477,11 @@ def check_entry():
         return
 
     sym      = bt["signal_asset"]
-    gap_side = bt["signal_side"]   # lado barato que compramos
+    gap_side = bt["signal_side"]    # lado sobre-extendido (barato, con el gap)
+    reversal = bt["reversal_side"]  # lado que COMPRAMOS (opuesto al gap)
 
-    # Precios del lado BARATO (el que tiene el gap)
-    if gap_side == "UP":
+    # Precios del lado CONTRARIO al gap (el caro, que el mercado favorece)
+    if reversal == "UP":
         entry_ask = markets[sym]["up_ask"]
         entry_bid = markets[sym]["up_bid"]
         entry_mid = markets[sym]["up_mid"]
@@ -497,16 +498,12 @@ def check_entry():
     dn_mid = markets[sym]["dn_mid"]
     if up_mid >= RESOLVED_UP_THRESH or up_mid <= RESOLVED_DN_THRESH or \
        dn_mid >= RESOLVED_UP_THRESH or dn_mid <= RESOLVED_DN_THRESH:
-        log_event(f"SKIP {gap_side} {sym} — activo ya resuelto")
+        log_event(f"SKIP {reversal} {sym} — activo ya resuelto")
         bt["skipped"] += 1
         return
 
-    # El lado barato no debe superar ENTRY_MAX_PRICE (garantiza ≥5 shares)
-    if entry_ask > ENTRY_MAX_PRICE:
-        log_event(
-            f"SKIP {gap_side} {sym} — ask={entry_ask:.4f} "
-            f"supera máximo {ENTRY_MAX_PRICE} (gap insuficiente para ≥5 shares)"
-        )
+    if entry_ask < ENTRY_MIN_PRICE:
+        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} bajo mínimo {ENTRY_MIN_PRICE}")
         bt["skipped"] += 1
         return
 
@@ -521,10 +518,10 @@ def check_entry():
     harm_entry     = bt["harm_up"] if gap_side == "UP" else bt["harm_dn"]
     gap_entry      = bt["signal_div"]
     capital_before = bt["capital"]
-    token_id       = markets[sym]["info"]["up_token_id"] if gap_side == "UP" else markets[sym]["info"]["down_token_id"]
+    token_id       = markets[sym]["info"]["up_token_id"] if reversal == "UP" else markets[sym]["info"]["down_token_id"]
 
     # ── COMPRA REAL ───────────────────────────────────────────────────────
-    log_event(f"COMPRANDO {gap_side} {sym} @ ask={entry_ask:.4f} | {shares_req} shares...")
+    log_event(f"COMPRANDO {reversal} {sym} @ ask={entry_ask:.4f} | {shares_req} shares... (gap {gap_side} {gap_entry*100:+.1f}bp)")
     result = place_taker_buy(token_id, shares_req, entry_ask)
 
     if not result["success"] or result["shares_filled"] < shares_req * 0.5:
@@ -543,8 +540,8 @@ def check_entry():
 
     bt["position"] = {
         "asset":            sym,
-        "side":             gap_side,
-        "gap_side":         gap_side,
+        "side":             reversal,   # lado que compramos (opuesto al gap)
+        "gap_side":         gap_side,   # lado sobre-extendido (referencia)
         "token_id":         token_id,
         "entry_price":      fill_price,
         "entry_bid":        entry_bid,
@@ -562,8 +559,8 @@ def check_entry():
     }
 
     log_event(
-        f"REVERSAL {gap_side} {sym} @ fill={fill_price:.4f} | "
-        f"gap={gap_entry*100:+.1f}bp (>{REVERSAL_THRESHOLD*100:.1f}bp) | "
+        f"REVERSAL {reversal} {sym} @ fill={fill_price:.4f} | "
+        f"gap {gap_side}={gap_entry*100:+.1f}bp (>{REVERSAL_THRESHOLD*100:.1f}bp) | "
         f"harm={harm_entry:.4f} | shares={shares_filled} | "
         f"capital=${bt['capital']:.2f}"
     )
