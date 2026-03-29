@@ -48,6 +48,10 @@ from strategy_core_prod import (
     get_clob_balance,
     get_usdc_balance,
 )
+from ws_client import MarketDataWS
+
+# WebSocket market data — reemplaza el polling REST del order book
+mws = MarketDataWS()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -344,36 +348,55 @@ async def discover_all():
         except Exception as e:
             markets[sym]["info"]  = None
             markets[sym]["error"] = str(e)
+
+    # Suscribir WebSocket con los 6 tokens (UP+DOWN de cada activo)
+    token_ids = []
+    for sym in SYMBOLS:
+        info = markets[sym]["info"]
+        if info:
+            token_ids.append(info["up_token_id"])
+            token_ids.append(info["down_token_id"])
+    if token_ids:
+        mws.unsubscribe()
+        mws.subscribe(token_ids)
+        log_event(f"WS suscrito a {len(token_ids)} tokens")
+
     bt["traded_this_cycle"] = False
     write_state()
 
 
-async def fetch_one(sym: str):
-    info = markets[sym]["info"]
-    if not info:
-        return
-    loop = asyncio.get_event_loop()
-    try:
-        up_m, err_up = await loop.run_in_executor(
-            None, get_order_book_metrics, info["up_token_id"]
-        )
-        dn_m, err_dn = await loop.run_in_executor(
-            None, get_order_book_metrics, info["down_token_id"]
-        )
+def _calc_mid(bid, ask):
+    if bid > 0 and ask > 0:
+        return round((bid + ask) / 2, 4)
+    return round(bid or ask, 4)
+
+
+def fetch_all_from_ws():
+    """Lee los precios desde el WebSocket (sin llamadas REST)."""
+    for sym in SYMBOLS:
+        info = markets[sym]["info"]
+        if not info:
+            continue
+        up_m = mws.get_metrics(info["up_token_id"])
+        dn_m = mws.get_metrics(info["down_token_id"])
+
+        # Fallback REST si el WS aún no tiene datos
+        if not up_m or not dn_m:
+            try:
+                up_m, _ = get_order_book_metrics(info["up_token_id"])
+                dn_m, _ = get_order_book_metrics(info["down_token_id"])
+            except Exception:
+                pass
+
         if up_m and dn_m:
             markets[sym]["up_bid"] = up_m["best_bid"]
             markets[sym]["up_ask"] = up_m["best_ask"]
             markets[sym]["dn_bid"] = dn_m["best_bid"]
             markets[sym]["dn_ask"] = dn_m["best_ask"]
 
-            def mid(bid, ask):
-                if bid > 0 and ask > 0:
-                    return round((bid + ask) / 2, 4)
-                return round(bid or ask, 4)
-
-            up_mid = mid(up_m["best_bid"], up_m["best_ask"])
+            up_mid = _calc_mid(up_m["best_bid"], up_m["best_ask"])
             markets[sym]["up_mid"] = up_mid
-            markets[sym]["dn_mid"] = mid(dn_m["best_bid"], dn_m["best_ask"])
+            markets[sym]["dn_mid"] = _calc_mid(dn_m["best_bid"], dn_m["best_ask"])
 
             if up_mid > 0:
                 mid_history[sym].append(up_mid)
@@ -387,13 +410,7 @@ async def fetch_one(sym: str):
                 markets[sym]["time_left"] = "N/A"
             markets[sym]["error"] = None
         else:
-            markets[sym]["error"] = err_up or err_dn or "error ob"
-    except Exception as e:
-        markets[sym]["error"] = str(e)
-
-
-async def fetch_all():
-    await asyncio.gather(*[fetch_one(sym) for sym in SYMBOLS])
+            markets[sym]["error"] = "sin datos WS"
 
 
 # ═══════════════════════════════════════════════════════
@@ -840,7 +857,7 @@ async def main_loop():
 
             bt["phase"] = "ACTIVO"
             bt["cycle"] += 1
-            await fetch_all()
+            fetch_all_from_ws()
 
             secs = min_secs_remaining()
             bt["entry_window"] = (
