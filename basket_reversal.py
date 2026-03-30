@@ -1,38 +1,20 @@
 """
-basket_reversal.py — Estrategia Fade Armónica v2  (Opción B)
+basket_reversal.py — Estrategia Fade Armónica v3
 
 LÓGICA:
-  Cuando el gap de un activo supera 11.5 bp respecto a la media armónica de
-  sus pares, apostamos al lado CONTRARIO al gap (fade/reversal):
+  Detección IDÉNTICA a basket.py (mismos filtros, mismo consenso FULL, mismo
+  DIVERGENCE_MAX). La única diferencia: en vez de entrar al lado del gap,
+  entramos al lado CONTRARIO.
 
-  Ejemplo A — gap detectado en UP:
-    UP de SOL cotiza ~0.70, DOWN de SOL cotiza ~0.30
-    → compramos DOWN a ~0.30
-    → si resuelve DOWN: ganamos (1/0.30 - 1) × $1.75 ≈ +$4.08  (~2.3x)
-    → si resuelve UP:   perdemos $1.75
+  Cuando basket detectaría señal UP en SOL (SOL-UP está barato, gap >= 10bp):
+    basket  → compra SOL-UP  @ ~0.65–0.70
+    reversal → compra SOL-DOWN @ ~0.30–0.35  ← payout ~2.3x si resuelve DOWN
 
-  Ejemplo B — gap detectado en DOWN:
-    DOWN de ETH cotiza ~0.70, UP de ETH cotiza ~0.30
-    → compramos UP a ~0.30
-    → si resuelve UP:   ganamos ~2.3x
-    → si resuelve DOWN: perdemos $1.75
-
-  El lado con el gap es el "barato" (~0.70). El lado que compramos es el
-  "caro" (~0.30), que tiene payout alto si el gap era ruido de mercado.
-
-  Backtest 3306 trades reales (31 días):
-    gap >= 11.5 bp → 746 trades | WR=39.3% | payout ~2.32x | EV +$0.305/trade
-    PnL total ($1.75/trade): ~$227 | Z-score 5.47 → confianza 99.9%
-    out-of-sample WR=41.1% (sin overfitting)
-
-DIFERENCIAS vs basket.py (v5):
-  - Solo entra cuando gap <= -REVERSAL_THRESHOLD = -0.10 (-10 bp)
-  - Sin DIVERGENCE_MAX — cualquier gap <= -10 bp es válido
-  - Entra al lado CONTRARIO al gap: signal_side=UP → compra DOWN (~0.30)
-  - ENTRY_MIN_PRICE = 0.30 — piso de precio (payout máximo razonable)
-  - ENTRY_MAX_PRICE = 0.35 — techo de precio (gap suficiente para payout objetivo)
-  - ENTRY_USD = $1.75 fijo
-  - Consenso SOFT: al menos 1 par confirma el sesgo del gap
+  Condiciones de entrada (iguales a basket + filtro de precio reversal):
+    1. Consenso FULL: ambos pares > 0.80 en el lado del gap
+    2. gap >= DIVERGENCE_THRESHOLD (0.10) y <= DIVERGENCE_MAX (0.14)
+    3. Precio del lado contrario (reversal) entre 0.30 y 0.35
+    4. Ventana de tiempo: 60s–85s restantes
 """
 
 import asyncio
@@ -56,7 +38,6 @@ from strategy_core_prod import (
 )
 from ws_client import MarketDataWS
 
-# WebSocket market data — reemplaza el polling REST del order book
 mws = MarketDataWS()
 
 logging.basicConfig(
@@ -70,38 +51,35 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ═══════════════════════════════════════════════════════
-#  PARÁMETROS
+#  PARÁMETROS — idénticos a basket.py salvo los de precio
 # ═══════════════════════════════════════════════════════
-POLL_INTERVAL         = 0.2
-REVERSAL_THRESHOLD    = 0.10    # 10 bp — gap debe ser <= -0.10 para entrada contrarian
-WAKE_UP_SECS          = 90
-ENTRY_WINDOW_SECS     = 85
-ENTRY_OPEN_SECS       = 60
-ENTRY_CLOSE_SECS      = 30
+POLL_INTERVAL        = 0.2
+DIVERGENCE_THRESHOLD = 0.10    # gap mínimo 10bp (igual a basket pero más estricto para reversal)
+DIVERGENCE_MAX       = 0.14    # gap máximo 14bp — igual que basket, descarta mercados rotos
+WAKE_UP_SECS         = 90
+ENTRY_WINDOW_SECS    = 85
+ENTRY_OPEN_SECS      = 60
+ENTRY_CLOSE_SECS     = 30
 
-CAPITAL_TOTAL         = 100.0
-ENTRY_USD             = 1.75    # $1.75 fijo — garantiza ≥5 shares con ask ≤0.35
+CAPITAL_TOTAL        = 100.0
+ENTRY_USD            = 1.75    # $1.75 fijo — garantiza ≥5 shares con ask ≤0.35
 
-RESOLVED_UP_THRESH    = 0.98
-RESOLVED_DN_THRESH    = 0.02
+RESOLVED_UP_THRESH   = 0.98
+RESOLVED_DN_THRESH   = 0.02
 
-# Para la reversión usamos consenso SOFT: basta con que 1 par confirme el sesgo
-CONSENSUS_REQUIRED    = "SOFT"
-CONSENSUS_SOFT        = 0.55    # peer del lado con gap debe estar > 0.55 para confirmar
+# Consenso IDÉNTICO a basket — FULL: ambos pares > 0.80 en el lado del gap
+CONSENSUS_FULL       = 0.80
+CONSENSUS_SOFT       = 0.80    # igual que basket
 
-ENTRY_MIN_PRICE       = 0.30    # piso: por debajo el payout es excesivo / precio irreal
-ENTRY_MAX_PRICE       = 0.35    # techo: por encima el gap es insuficiente para payout objetivo
+# Precio del lado CONTRARIO (reversal) — aquí es donde diferimos de basket
+ENTRY_MIN_PRICE      = 0.30    # piso: payout máximo razonable
+ENTRY_MAX_PRICE      = 0.35    # techo: confirma que el gap es suficiente
 
-MID_HISTORY_SIZE      = 3
+MID_HISTORY_SIZE     = 3
 
 LOG_FILE   = os.environ.get("LOG_FILE",   "/data/reversal_log.json")
 CSV_FILE   = os.environ.get("CSV_FILE",   "/data/reversal_trades.csv")
 STATE_FILE = os.environ.get("STATE_FILE", "/data/reversal_state.json")
-
-# Credenciales — requeridas en producción
-# POLYMARKET_KEY   → clave privada hex de la wallet
-# PROXY_ADDRESS    → dirección proxy en Polymarket
-# POLY_CHAIN_ID    → 137 (Polygon mainnet, default)
 
 # ═══════════════════════════════════════════════════════
 #  ESTADO
@@ -126,9 +104,9 @@ mid_history: dict[str, deque] = {
 bt = {
     "harm_up":            0.0,
     "harm_dn":            0.0,
-    "signal_asset":       None,   # activo con mayor gap
-    "signal_side":        None,   # lado CON el gap (UP o DOWN)
-    "reversal_side":      None,   # lado que ENTRAMOS (opuesto al gap)
+    "signal_asset":       None,
+    "signal_side":        None,
+    "reversal_side":      None,
     "signal_div":         0.0,
     "entry_window":       False,
     "position":           None,
@@ -178,16 +156,16 @@ def harmonic_mean(values: list) -> float:
     return len(values) / sum(1.0 / v for v in values)
 
 
-def find_most_extended(mids: dict, h_avg: float):
-    """Retorna el activo con MAYOR desviación negativa (más barato) respecto a la media."""
+def find_cheapest(mids: dict, h_avg: float):
+    """Igual que basket — retorna el activo con mayor desviación negativa."""
     if h_avg == 0:
         return None, 0.0
-    name, diff = None, 0.0
-    for asset, mid in mids.items():
-        d = mid - h_avg
-        if d < diff:
-            diff, name = d, asset
-    return name, diff
+    cheapest_name, cheapest_diff = None, 0.0
+    for name, mid in mids.items():
+        diff = mid - h_avg
+        if diff < cheapest_diff:
+            cheapest_diff, cheapest_name = diff, name
+    return cheapest_name, cheapest_diff
 
 
 def min_secs_remaining() -> float | None:
@@ -292,7 +270,6 @@ def write_state():
 # ═══════════════════════════════════════════════════════
 
 def sincronizar_capital_clob():
-    """Sincroniza el capital con el saldo USDC real del CLOB al arrancar."""
     balance = get_usdc_balance()
     if balance is not None and balance > 0:
         bt["capital"] = round(balance, 4)
@@ -355,7 +332,6 @@ async def discover_all():
             markets[sym]["info"]  = None
             markets[sym]["error"] = str(e)
 
-    # Suscribir WebSocket con los 6 tokens (UP+DOWN de cada activo)
     token_ids = []
     for sym in SYMBOLS:
         info = markets[sym]["info"]
@@ -378,7 +354,6 @@ def _calc_mid(bid, ask):
 
 
 def fetch_all_from_ws():
-    """Lee los precios desde el WebSocket (sin llamadas REST)."""
     for sym in SYMBOLS:
         info = markets[sym]["info"]
         if not info:
@@ -386,7 +361,6 @@ def fetch_all_from_ws():
         up_m = mws.get_metrics(info["up_token_id"])
         dn_m = mws.get_metrics(info["down_token_id"])
 
-        # Fallback REST si el WS aún no tiene datos
         if not up_m or not dn_m:
             try:
                 up_m, _ = get_order_book_metrics(info["up_token_id"])
@@ -420,24 +394,24 @@ def fetch_all_from_ws():
 
 
 # ═══════════════════════════════════════════════════════
-#  SEÑALES
+#  SEÑALES — IDÉNTICO A BASKET, solo agrega reversal_side
 # ═══════════════════════════════════════════════════════
 
 def compute_signals():
-    def norm_up(s):
-        m = markets[s]["up_mid"]
-        if m >= RESOLVED_UP_THRESH: return 1.0
-        if m <= RESOLVED_DN_THRESH: return 0.0
-        return m
+    def normalized_up(s):
+        mid = markets[s]["up_mid"]
+        if mid >= RESOLVED_UP_THRESH: return 1.0
+        if mid <= RESOLVED_DN_THRESH: return 0.0
+        return mid
 
-    def norm_dn(s):
-        m = markets[s]["dn_mid"]
-        if m >= RESOLVED_UP_THRESH: return 1.0
-        if m <= RESOLVED_DN_THRESH: return 0.0
-        return m
+    def normalized_dn(s):
+        mid = markets[s]["dn_mid"]
+        if mid >= RESOLVED_UP_THRESH: return 1.0
+        if mid <= RESOLVED_DN_THRESH: return 0.0
+        return mid
 
-    up_mids = {s: norm_up(s) for s in SYMBOLS if markets[s]["up_mid"] > 0}
-    dn_mids = {s: norm_dn(s) for s in SYMBOLS if markets[s]["dn_mid"] > 0}
+    up_mids = {s: normalized_up(s) for s in SYMBOLS if markets[s]["up_mid"] > 0}
+    dn_mids = {s: normalized_dn(s) for s in SYMBOLS if markets[s]["dn_mid"] > 0}
 
     if len(up_mids) < 2:
         bt["signal_asset"] = None
@@ -448,42 +422,38 @@ def compute_signals():
     bt["harm_up"] = harm_up
     bt["harm_dn"] = harm_dn
 
-    ext_up, div_up = find_most_extended(up_mids, harm_up)
-    ext_dn, div_dn = find_most_extended(dn_mids, harm_dn)
+    # find_cheapest idéntico a basket
+    cheapest_up, div_up = find_cheapest(up_mids, harm_up)
+    cheapest_dn, div_dn = find_cheapest(dn_mids, harm_dn)
 
-    # El gap más grande (en valor absoluto) gana
-    if abs(div_up) >= abs(div_dn) and ext_up:
-        bt["signal_asset"]  = ext_up
-        bt["signal_side"]   = "UP"    # lado sobre-extendido (barato)
-        bt["reversal_side"] = "DOWN"  # apostamos al lado contrario (caro, favorecido)
+    if abs(div_up) >= abs(div_dn) and cheapest_up:
+        bt["signal_asset"]  = cheapest_up
+        bt["signal_side"]   = "UP"      # lado con gap (el "caro" en basket, aquí también)
+        bt["reversal_side"] = "DOWN"    # lado que COMPRAMOS nosotros
         bt["signal_div"]    = div_up
-    elif ext_dn:
-        bt["signal_asset"]  = ext_dn
+    elif cheapest_dn:
+        bt["signal_asset"]  = cheapest_dn
         bt["signal_side"]   = "DOWN"
-        bt["reversal_side"] = "UP"    # ídem
+        bt["reversal_side"] = "UP"
         bt["signal_div"]    = div_dn
     else:
-        bt["signal_asset"] = None
+        bt["signal_asset"]  = None
         bt["reversal_side"] = None
         return
 
-    # Consenso: cuando hay gap > 11.5bp en 1 activo, los pares suelen estar
-    # cerca de resolución (0.80-0.99). Eso CONFIRMA que el gap es real:
-    # el mercado ya casi resolvió en los pares, y el activo con gap está rezagado.
-    # Consenso SOFT = al menos 1 par tiene el lado del gap > 0.55 (confirma sesgo).
-    asset = bt["signal_asset"]
-    side  = bt["signal_side"]
-    peers = [s for s in SYMBOLS if s != asset]
-
-    if side == "UP":
+    # Consenso IDÉNTICO a basket — FULL requiere ambos pares > 0.80
+    peers = [s for s in SYMBOLS if s != bt["signal_asset"]]
+    if bt["signal_side"] == "UP":
         peer_vals = [markets[p]["up_mid"] for p in peers if markets[p]["up_mid"] > 0]
-        # Los pares deben confirmar sesgo UP (>0.55) — el activo con gap está rezagado
-        confirming = [v for v in peer_vals if v > CONSENSUS_SOFT]
-        bt["consensus"] = "SOFT" if len(confirming) >= 1 else "NONE"
     else:
         peer_vals = [markets[p]["dn_mid"] for p in peers if markets[p]["dn_mid"] > 0]
-        confirming = [v for v in peer_vals if v > CONSENSUS_SOFT]
-        bt["consensus"] = "SOFT" if len(confirming) >= 1 else "NONE"
+
+    if len(peer_vals) == 2 and all(v > CONSENSUS_FULL for v in peer_vals):
+        bt["consensus"] = "FULL"
+    elif len(peer_vals) >= 1 and sum(1 for v in peer_vals if v > CONSENSUS_SOFT) >= 1:
+        bt["consensus"] = "SOFT"
+    else:
+        bt["consensus"] = "NONE"
 
 
 # ═══════════════════════════════════════════════════════
@@ -495,29 +465,28 @@ def check_entry():
         return
     if not bt["entry_window"]:
         return
-    if bt["consensus"] != CONSENSUS_REQUIRED:
+
+    # Consenso FULL igual que basket
+    if bt["consensus"] != "FULL":
         bt["skipped"] += 1
         return
+
     if not bt["signal_asset"] or not bt["reversal_side"]:
         return
 
-    gap = bt["signal_div"]
+    div_abs = abs(bt["signal_div"])
 
-    # Entrada solo cuando el gap es <= -0.10 (negativo: activo por debajo de la media)
-    # Incluye -10, -11, -12 bp, etc.
-    if gap > -REVERSAL_THRESHOLD:
+    # Gap mínimo — debe ser al menos 10bp
+    if div_abs < DIVERGENCE_THRESHOLD:
         return
 
+    # Sin gap máximo — gaps grandes (12, 14, 20bp...) son bienvenidos en reversal
+
     sym      = bt["signal_asset"]
-    gap_side = bt["signal_side"]    # lado sobre-extendido (con el gap, el "barato")
+    gap_side = bt["signal_side"]
+    reversal = bt["reversal_side"]
 
-    # ── LÓGICA FADE ──────────────────────────────────────────────────────────
-    # El gap está en gap_side (ese lado está barato vs. media armónica).
-    # Apostamos al lado CONTRARIO: si el gap está en UP → compramos DOWN.
-    # Si el gap está en DOWN → compramos UP.
-    # El lado contrario cotiza ~0.30–0.35 cuando gap <= -10bp → payout ~2.3x.
-    reversal = bt["reversal_side"]   # ya calculado en compute_signals (opuesto al gap)
-
+    # Leemos precio del lado CONTRARIO (reversal), no del lado del gap
     if reversal == "UP":
         entry_ask = markets[sym]["up_ask"]
         entry_bid = markets[sym]["up_bid"]
@@ -530,22 +499,23 @@ def check_entry():
     if entry_ask <= 0 or entry_ask >= 1:
         return
 
-    # Evitar activos ya resueltos
+    # Evitar activos ya resueltos — igual que basket
     up_mid = markets[sym]["up_mid"]
     dn_mid = markets[sym]["dn_mid"]
     if up_mid >= RESOLVED_UP_THRESH or up_mid <= RESOLVED_DN_THRESH or \
        dn_mid >= RESOLVED_UP_THRESH or dn_mid <= RESOLVED_DN_THRESH:
-        log_event(f"SKIP {reversal} {sym} — activo ya resuelto")
+        log_event(f"SKIP {reversal} {sym} — activo ya resuelto (up={up_mid:.4f} dn={dn_mid:.4f})")
         bt["skipped"] += 1
         return
 
+    # Filtro de precio del lado reversal: debe estar entre 0.30 y 0.35
     if entry_ask < ENTRY_MIN_PRICE:
-        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} por debajo del mínimo {ENTRY_MIN_PRICE} (precio irreal)")
+        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} bajo mínimo {ENTRY_MIN_PRICE}")
         bt["skipped"] += 1
         return
 
     if entry_ask > ENTRY_MAX_PRICE:
-        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} supera máximo {ENTRY_MAX_PRICE} (gap insuficiente para payout)")
+        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} supera máximo {ENTRY_MAX_PRICE}")
         bt["skipped"] += 1
         return
 
@@ -562,46 +532,44 @@ def check_entry():
     capital_before = bt["capital"]
     token_id       = markets[sym]["info"]["up_token_id"] if reversal == "UP" else markets[sym]["info"]["down_token_id"]
 
-    # ── COMPRA REAL ───────────────────────────────────────────────────────
     log_event(f"COMPRANDO {reversal} {sym} @ ask={entry_ask:.4f} | {shares_req} shares... (gap {gap_side} {gap_entry*100:+.1f}bp)")
     result = place_taker_buy(token_id, shares_req, entry_ask)
 
     if not result["success"] or result["shares_filled"] < shares_req * 0.5:
-        log_event(f"FALLO compra {gap_side} {sym}: {result['error']}")
+        log_event(f"FALLO compra {reversal} {sym}: {result['error']}")
         return
 
     shares_filled = result["shares_filled"]
     fill_price    = result.get("fill_price", entry_ask)
     usd_spent     = round(shares_filled * fill_price, 4)
 
-    # Pre-aprobar token para poder vender en stop loss
     approve_conditional_token(token_id)
 
     bt["capital"]           -= usd_spent
     bt["traded_this_cycle"]  = True
 
     bt["position"] = {
-        "asset":            sym,
-        "side":             reversal,   # lado que compramos (opuesto al gap)
-        "gap_side":         gap_side,   # lado sobre-extendido (referencia)
-        "token_id":         token_id,
-        "entry_price":      fill_price,
-        "entry_bid":        entry_bid,
-        "entry_mid":        entry_mid,
-        "entry_usd":        usd_spent,
-        "shares":           shares_filled,
-        "secs_left_entry":  secs,
-        "harm_entry":       harm_entry,
-        "gap_entry":        gap_entry,
-        "entry_ts":         datetime.now().isoformat(),
-        "consensus_entry":  bt["consensus"],
-        "peer_snaps":       peer_snaps,
-        "capital_before":   capital_before,
+        "asset":           sym,
+        "side":            reversal,
+        "gap_side":        gap_side,
+        "token_id":        token_id,
+        "entry_price":     fill_price,
+        "entry_bid":       entry_bid,
+        "entry_mid":       entry_mid,
+        "entry_usd":       usd_spent,
+        "shares":          shares_filled,
+        "secs_left_entry": secs,
+        "harm_entry":      harm_entry,
+        "gap_entry":       gap_entry,
+        "entry_ts":        datetime.now().isoformat(),
+        "consensus_entry": bt["consensus"],
+        "peer_snaps":      peer_snaps,
+        "capital_before":  capital_before,
     }
 
     log_event(
         f"REVERSAL {reversal} {sym} @ fill={fill_price:.4f} | "
-        f"gap {gap_side}={gap_entry*100:+.1f}bp (<= -{REVERSAL_THRESHOLD*100:.1f}bp) | "
+        f"gap {gap_side}={gap_entry*100:+.1f}bp | "
         f"harm={harm_entry:.4f} | shares={shares_filled} | "
         f"capital=${bt['capital']:.2f}"
     )
@@ -616,7 +584,6 @@ def _apply_resolution(pos, resolved):
     sym  = pos["asset"]
     side = pos["side"]
     if resolved == side:
-        # Ganamos — Polymarket auto-redime shares → 1 USDC cada una
         pnl     = round(pos["shares"] - pos["entry_usd"], 6)
         outcome = "WIN"
         bt["wins"] += 1
@@ -625,7 +592,6 @@ def _apply_resolution(pos, resolved):
         outcome = "LOSS"
         bt["losses"] += 1
 
-    # Sincronizar capital real desde CLOB (el redeem ya habrá ocurrido)
     time.sleep(2.0)
     balance_real = get_usdc_balance()
     if balance_real is not None and balance_real > 0:
@@ -693,7 +659,7 @@ def _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl):
 
     def peer_mids(p):
         snap = peer_snaps.get(p, {})
-        side = pos.get("gap_side", pos["side"])  # referencia del gap, no del reversal
+        side = pos.get("gap_side", pos["side"])
         if side == "UP":
             return snap.get("up_mid", 0.0), snap.get("dn_mid", 0.0)
         return snap.get("dn_mid", 0.0), snap.get("up_mid", 0.0)
@@ -766,17 +732,18 @@ def _save_log():
         json.dump({
             "strategy": "REVERSAL",
             "summary": {
-                "capital_inicial":  CAPITAL_TOTAL,
-                "capital_actual":   round(bt["capital"], 4),
-                "total_pnl_usd":    round(bt["total_pnl"], 4),
-                "roi_pct":          round((bt["capital"] - CAPITAL_TOTAL) / CAPITAL_TOTAL * 100, 2),
-                "max_drawdown":     round(bt["max_drawdown"], 4),
-                "wins":             bt["wins"],
-                "losses":           bt["losses"],
-                "win_rate":         round(bt["wins"] / total * 100, 1) if total else 0,
-                "skipped":          bt["skipped"],
-                "entry_usd":        ENTRY_USD,
-                "reversal_threshold_bp": REVERSAL_THRESHOLD * 100,
+                "capital_inicial":    CAPITAL_TOTAL,
+                "capital_actual":     round(bt["capital"], 4),
+                "total_pnl_usd":      round(bt["total_pnl"], 4),
+                "roi_pct":            round((bt["capital"] - CAPITAL_TOTAL) / CAPITAL_TOTAL * 100, 2),
+                "max_drawdown":       round(bt["max_drawdown"], 4),
+                "wins":               bt["wins"],
+                "losses":             bt["losses"],
+                "win_rate":           round(bt["wins"] / total * 100, 1) if total else 0,
+                "skipped":            bt["skipped"],
+                "entry_usd":          ENTRY_USD,
+                "divergence_threshold": DIVERGENCE_THRESHOLD * 100,
+                "divergence_max":     DIVERGENCE_MAX * 100,
             },
             "trades": bt["trades"],
         }, f, indent=2)
@@ -787,9 +754,9 @@ def _save_log():
 # ═══════════════════════════════════════════════════════
 
 async def main_loop():
-    log_event("basket_reversal.py iniciado — REVERSIÓN ARMÓNICA v1")
+    log_event("basket_reversal.py iniciado — REVERSIÓN ARMÓNICA v3")
     log_event(f"Capital: ${CAPITAL_TOTAL:.0f} | Entrada: ${ENTRY_USD:.2f} fijo")
-    log_event(f"Umbral reversión: gap <= -{REVERSAL_THRESHOLD*100:.1f}bp | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
+    log_event(f"Gap: {DIVERGENCE_THRESHOLD*100:.0f}–{DIVERGENCE_MAX*100:.0f}bp | Precio reversal: {ENTRY_MIN_PRICE}–{ENTRY_MAX_PRICE} | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
 
     restore_state_from_csv()
     sincronizar_capital_clob()
@@ -875,9 +842,10 @@ def run_dashboard():
 
 if __name__ == "__main__":
     log.info("=" * 58)
-    log.info("  BASKET REVERSAL — REVERSIÓN ARMÓNICA  v1")
-    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (ask {ENTRY_MIN_PRICE}–{ENTRY_MAX_PRICE}, payout ~2.3x)")
-    log.info(f"  Umbral: gap <= -{REVERSAL_THRESHOLD*100:.1f}bp  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
+    log.info("  BASKET REVERSAL — REVERSIÓN ARMÓNICA  v3")
+    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo")
+    log.info(f"  Gap: {DIVERGENCE_THRESHOLD*100:.0f}–{DIVERGENCE_MAX*100:.0f}bp  |  Precio reversal: {ENTRY_MIN_PRICE}–{ENTRY_MAX_PRICE}")
+    log.info(f"  Consenso: FULL (ambos pares > {CONSENSUS_FULL})  |  Ventana: {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
     log.info("  PRODUCCION — ORDENES REALES ACTIVAS")
     log.info("=" * 58)
     log.info(f"State -> {STATE_FILE} | Log -> {LOG_FILE}")
