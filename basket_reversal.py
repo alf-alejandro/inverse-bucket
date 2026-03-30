@@ -916,7 +916,7 @@ if __name__ == "__main__":
     log.info("  BASKET REVERSAL — REVERSIÓN ARMÓNICA  v1")
     log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (ask <= {ENTRY_MAX_PRICE}, payout ~2.3x)")
     log.info(f"  Umbral: >{REVERSAL_THRESHOLD*100:.1f}bp  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
-    log.info("  SIMULACION — SIN DINERO REAL")
+    log.info("  PRODUCCION — ORDENES REALES ACTIVAS")
     log.info("=" * 58)
     log.info(f"State -> {STATE_FILE} | Log -> {LOG_FILE}")
 
