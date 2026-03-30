@@ -26,8 +26,8 @@ LÓGICA:
     out-of-sample WR=41.1% (sin overfitting)
 
 DIFERENCIAS vs basket.py (v5):
-  - Solo entra cuando gap > REVERSAL_THRESHOLD = 0.115 (11.5 bp)
-  - Sin DIVERGENCE_MAX — cualquier gap > 11.5 bp es válido
+  - Solo entra cuando gap <= -REVERSAL_THRESHOLD = -0.10 (-10 bp)
+  - Sin DIVERGENCE_MAX — cualquier gap <= -10 bp es válido
   - Entra al lado CONTRARIO al gap: signal_side=UP → compra DOWN (~0.30)
   - ENTRY_MIN_PRICE = 0.30 — piso de precio (payout máximo razonable)
   - ENTRY_MAX_PRICE = 0.35 — techo de precio (gap suficiente para payout objetivo)
@@ -73,7 +73,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 #  PARÁMETROS
 # ═══════════════════════════════════════════════════════
 POLL_INTERVAL         = 0.2
-REVERSAL_THRESHOLD    = 0.115   # 11.5 bp — gap mínimo para entrada contrarian
+REVERSAL_THRESHOLD    = 0.10    # 10 bp — gap debe ser <= -0.10 para entrada contrarian
 WAKE_UP_SECS          = 90
 ENTRY_WINDOW_SECS     = 85
 ENTRY_OPEN_SECS       = 60
@@ -501,10 +501,11 @@ def check_entry():
     if not bt["signal_asset"] or not bt["reversal_side"]:
         return
 
-    div_abs = abs(bt["signal_div"])
+    gap = bt["signal_div"]
 
-    # Entrada solo cuando el gap supera el umbral de sobre-extensión
-    if div_abs <= REVERSAL_THRESHOLD:
+    # Entrada solo cuando el gap es <= -0.10 (negativo: activo por debajo de la media)
+    # Incluye -10, -11, -12 bp, etc.
+    if gap > -REVERSAL_THRESHOLD:
         return
 
     sym      = bt["signal_asset"]
@@ -514,7 +515,7 @@ def check_entry():
     # El gap está en gap_side (ese lado está barato vs. media armónica).
     # Apostamos al lado CONTRARIO: si el gap está en UP → compramos DOWN.
     # Si el gap está en DOWN → compramos UP.
-    # El lado contrario cotiza ~0.30–0.35 cuando gap > 11.5bp → payout ~2.3x.
+    # El lado contrario cotiza ~0.30–0.35 cuando gap <= -10bp → payout ~2.3x.
     reversal = bt["reversal_side"]   # ya calculado en compute_signals (opuesto al gap)
 
     if reversal == "UP":
@@ -600,7 +601,7 @@ def check_entry():
 
     log_event(
         f"REVERSAL {reversal} {sym} @ fill={fill_price:.4f} | "
-        f"gap {gap_side}={gap_entry*100:+.1f}bp (>{REVERSAL_THRESHOLD*100:.1f}bp) | "
+        f"gap {gap_side}={gap_entry*100:+.1f}bp (<= -{REVERSAL_THRESHOLD*100:.1f}bp) | "
         f"harm={harm_entry:.4f} | shares={shares_filled} | "
         f"capital=${bt['capital']:.2f}"
     )
@@ -788,7 +789,7 @@ def _save_log():
 async def main_loop():
     log_event("basket_reversal.py iniciado — REVERSIÓN ARMÓNICA v1")
     log_event(f"Capital: ${CAPITAL_TOTAL:.0f} | Entrada: ${ENTRY_USD:.2f} fijo")
-    log_event(f"Umbral reversión: >{REVERSAL_THRESHOLD*100:.1f}bp | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
+    log_event(f"Umbral reversión: gap <= -{REVERSAL_THRESHOLD*100:.1f}bp | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
 
     restore_state_from_csv()
     sincronizar_capital_clob()
@@ -876,7 +877,7 @@ if __name__ == "__main__":
     log.info("=" * 58)
     log.info("  BASKET REVERSAL — REVERSIÓN ARMÓNICA  v1")
     log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (ask {ENTRY_MIN_PRICE}–{ENTRY_MAX_PRICE}, payout ~2.3x)")
-    log.info(f"  Umbral: >{REVERSAL_THRESHOLD*100:.1f}bp  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
+    log.info(f"  Umbral: gap <= -{REVERSAL_THRESHOLD*100:.1f}bp  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
     log.info("  PRODUCCION — ORDENES REALES ACTIVAS")
     log.info("=" * 58)
     log.info(f"State -> {STATE_FILE} | Log -> {LOG_FILE}")
