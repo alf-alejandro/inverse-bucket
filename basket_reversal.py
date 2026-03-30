@@ -29,7 +29,8 @@ DIFERENCIAS vs basket.py (v5):
   - Solo entra cuando gap > REVERSAL_THRESHOLD = 0.115 (11.5 bp)
   - Sin DIVERGENCE_MAX — cualquier gap > 11.5 bp es válido
   - Entra al lado CONTRARIO al gap: signal_side=UP → compra DOWN (~0.30)
-  - ENTRY_MAX_PRICE = 0.40 — filtra entradas donde el payout sería bajo
+  - ENTRY_MIN_PRICE = 0.30 — piso de precio (payout máximo razonable)
+  - ENTRY_MAX_PRICE = 0.35 — techo de precio (gap suficiente para payout objetivo)
   - ENTRY_USD = $1.75 fijo
   - Consenso SOFT: al menos 1 par confirma el sesgo del gap
 """
@@ -88,7 +89,8 @@ RESOLVED_DN_THRESH    = 0.02
 CONSENSUS_REQUIRED    = "SOFT"
 CONSENSUS_SOFT        = 0.55    # peer del lado con gap debe estar > 0.55 para confirmar
 
-ENTRY_MAX_PRICE       = 0.40    # el lado contrario (favorecido) cotiza ~0.25–0.35 cuando gap > 11.5 bp
+ENTRY_MIN_PRICE       = 0.30    # piso: por debajo el payout es excesivo / precio irreal
+ENTRY_MAX_PRICE       = 0.35    # techo: por encima el gap es insuficiente para payout objetivo
 
 MID_HISTORY_SIZE      = 3
 
@@ -512,7 +514,7 @@ def check_entry():
     # El gap está en gap_side (ese lado está barato vs. media armónica).
     # Apostamos al lado CONTRARIO: si el gap está en UP → compramos DOWN.
     # Si el gap está en DOWN → compramos UP.
-    # El lado contrario cotiza ~0.30 cuando gap > 11.5bp → payout ~2.3x.
+    # El lado contrario cotiza ~0.30–0.35 cuando gap > 11.5bp → payout ~2.3x.
     reversal = bt["reversal_side"]   # ya calculado en compute_signals (opuesto al gap)
 
     if reversal == "UP":
@@ -533,6 +535,11 @@ def check_entry():
     if up_mid >= RESOLVED_UP_THRESH or up_mid <= RESOLVED_DN_THRESH or \
        dn_mid >= RESOLVED_UP_THRESH or dn_mid <= RESOLVED_DN_THRESH:
         log_event(f"SKIP {reversal} {sym} — activo ya resuelto")
+        bt["skipped"] += 1
+        return
+
+    if entry_ask < ENTRY_MIN_PRICE:
+        log_event(f"SKIP {reversal} {sym} — ask={entry_ask:.4f} por debajo del mínimo {ENTRY_MIN_PRICE} (precio irreal)")
         bt["skipped"] += 1
         return
 
@@ -868,7 +875,7 @@ def run_dashboard():
 if __name__ == "__main__":
     log.info("=" * 58)
     log.info("  BASKET REVERSAL — REVERSIÓN ARMÓNICA  v1")
-    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (ask <= {ENTRY_MAX_PRICE}, payout ~2.3x)")
+    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f} fijo (ask {ENTRY_MIN_PRICE}–{ENTRY_MAX_PRICE}, payout ~2.3x)")
     log.info(f"  Umbral: >{REVERSAL_THRESHOLD*100:.1f}bp  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
     log.info("  PRODUCCION — ORDENES REALES ACTIVAS")
     log.info("=" * 58)
