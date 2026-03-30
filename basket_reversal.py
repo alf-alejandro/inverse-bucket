@@ -500,18 +500,23 @@ def check_entry():
         return
 
     sym      = bt["signal_asset"]
-    gap_side = bt["signal_side"]    # lado sobre-extendido (barato, con el gap)
-    reversal = bt["reversal_side"]  # lado que COMPRAMOS (opuesto al gap)
+    gap_side = bt["signal_side"]    # lado sobre-extendido (con el gap)
 
-    # Precios del lado CONTRARIO al gap (el caro, que el mercado favorece)
-    if reversal == "UP":
-        entry_ask = markets[sym]["up_ask"]
-        entry_bid = markets[sym]["up_bid"]
-        entry_mid = markets[sym]["up_mid"]
+    # Compramos siempre el lado más barato (payout máximo)
+    up_ask = markets[sym]["up_ask"]
+    dn_ask = markets[sym]["dn_ask"]
+    if up_ask > 0 and dn_ask > 0 and up_ask < dn_ask:
+        reversal   = "UP"
+        entry_ask  = up_ask
+        entry_bid  = markets[sym]["up_bid"]
+        entry_mid  = markets[sym]["up_mid"]
     else:
-        entry_ask = markets[sym]["dn_ask"]
-        entry_bid = markets[sym]["dn_bid"]
-        entry_mid = markets[sym]["dn_mid"]
+        reversal   = "DOWN"
+        entry_ask  = dn_ask
+        entry_bid  = markets[sym]["dn_bid"]
+        entry_mid  = markets[sym]["dn_mid"]
+
+    bt["reversal_side"] = reversal  # actualizar para dashboard
 
     if entry_ask <= 0 or entry_ask >= 1:
         return
