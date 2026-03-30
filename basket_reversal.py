@@ -3,15 +3,22 @@ basket_reversal.py — Estrategia Fade Armónica v2  (Opción B)
 
 LÓGICA:
   Cuando el gap de un activo supera 11.5 bp respecto a la media armónica de
-  sus pares, el precio se ha sobre-extendido. La estrategia original (basket.py)
-  compra el lado barato (~0.70) esperando que siga — pero en esa zona el win
-  rate cae al ~60%. Apostamos al lado CONTRARIO (fade): si UP de SOL está muy
-  bajo (0.70), DOWN de SOL cotiza ~0.30. Compramos DOWN a 0.30 — si resuelve
-  DOWN, cobramos 1/0.30 = +2.32x por cada $1 apostado.
+  sus pares, apostamos al lado CONTRARIO al gap (fade/reversal):
 
-  Ejemplo: UP de SOL cae 12 bp por debajo de la media armónica (gap en UP) →
-           UP cotiza ~0.70, DOWN cotiza ~0.30 →
-           compramos DOWN a ~0.30 apostando a que el mercado sobre-extendió UP.
+  Ejemplo A — gap detectado en UP:
+    UP de SOL cotiza ~0.70, DOWN de SOL cotiza ~0.30
+    → compramos DOWN a ~0.30
+    → si resuelve DOWN: ganamos (1/0.30 - 1) × $1.75 ≈ +$4.08  (~2.3x)
+    → si resuelve UP:   perdemos $1.75
+
+  Ejemplo B — gap detectado en DOWN:
+    DOWN de ETH cotiza ~0.70, UP de ETH cotiza ~0.30
+    → compramos UP a ~0.30
+    → si resuelve UP:   ganamos ~2.3x
+    → si resuelve DOWN: perdemos $1.75
+
+  El lado con el gap es el "barato" (~0.70). El lado que compramos es el
+  "caro" (~0.30), que tiene payout alto si el gap era ruido de mercado.
 
   Backtest 3306 trades reales (31 días):
     gap >= 11.5 bp → 746 trades | WR=39.3% | payout ~2.32x | EV +$0.305/trade
@@ -43,9 +50,7 @@ from strategy_core_prod import (
     get_order_book_metrics,
     seconds_remaining,
     place_taker_buy,
-    place_taker_sell,
     approve_conditional_token,
-    get_clob_balance,
     get_usdc_balance,
 )
 from ws_client import MarketDataWS
@@ -84,7 +89,6 @@ CONSENSUS_REQUIRED    = "SOFT"
 CONSENSUS_SOFT        = 0.55    # umbral para contar un par como "del mismo lado"
 
 ENTRY_MAX_PRICE       = 0.40    # el lado contrario (favorecido) cotiza ~0.25–0.35 cuando gap > 11.5 bp
-STOP_LOSS_PRICE       = 0.33
 
 MID_HISTORY_SIZE      = 3
 
@@ -150,7 +154,7 @@ CSV_COLUMNS = [
     "secs_left_entry", "harm_entry", "gap_pts",
     "peer1_sym", "peer1_side_mid", "peer1_opp_mid",
     "peer2_sym", "peer2_side_mid", "peer2_opp_mid",
-    "sl_price", "exit_type", "exit_price", "resolved", "binary_win",
+    "exit_type", "exit_price", "resolved", "binary_win",
     "pnl_usd", "pnl_pct_entry", "max_possible_win", "outcome",
     "capital_before", "capital_after", "cumulative_pnl", "trade_number",
 ]
@@ -500,23 +504,23 @@ def check_entry():
         return
 
     sym      = bt["signal_asset"]
-    gap_side = bt["signal_side"]    # lado sobre-extendido (con el gap)
+    gap_side = bt["signal_side"]    # lado sobre-extendido (con el gap, el "barato")
 
-    # Compramos siempre el lado más barato (payout máximo)
-    up_ask = markets[sym]["up_ask"]
-    dn_ask = markets[sym]["dn_ask"]
-    if up_ask > 0 and dn_ask > 0 and up_ask < dn_ask:
-        reversal   = "UP"
-        entry_ask  = up_ask
-        entry_bid  = markets[sym]["up_bid"]
-        entry_mid  = markets[sym]["up_mid"]
+    # ── LÓGICA FADE ──────────────────────────────────────────────────────────
+    # El gap está en gap_side (ese lado está barato vs. media armónica).
+    # Apostamos al lado CONTRARIO: si el gap está en UP → compramos DOWN.
+    # Si el gap está en DOWN → compramos UP.
+    # El lado contrario cotiza ~0.30 cuando gap > 11.5bp → payout ~2.3x.
+    reversal = bt["reversal_side"]   # ya calculado en compute_signals (opuesto al gap)
+
+    if reversal == "UP":
+        entry_ask = markets[sym]["up_ask"]
+        entry_bid = markets[sym]["up_bid"]
+        entry_mid = markets[sym]["up_mid"]
     else:
-        reversal   = "DOWN"
-        entry_ask  = dn_ask
-        entry_bid  = markets[sym]["dn_bid"]
-        entry_mid  = markets[sym]["dn_mid"]
-
-    bt["reversal_side"] = reversal  # actualizar para dashboard
+        entry_ask = markets[sym]["dn_ask"]
+        entry_bid = markets[sym]["dn_bid"]
+        entry_mid = markets[sym]["dn_mid"]
 
     if entry_ask <= 0 or entry_ask >= 1:
         return
@@ -583,7 +587,6 @@ def check_entry():
         "consensus_entry":  bt["consensus"],
         "peer_snaps":       peer_snaps,
         "capital_before":   capital_before,
-        "salida_pendiente": False,
     }
 
     log_event(
@@ -592,52 +595,6 @@ def check_entry():
         f"harm={harm_entry:.4f} | shares={shares_filled} | "
         f"capital=${bt['capital']:.2f}"
     )
-    write_state()
-
-
-# ═══════════════════════════════════════════════════════
-#  STOP LOSS
-# ═══════════════════════════════════════════════════════
-
-def check_stop_loss():
-    pos = bt["position"]
-    if not pos:
-        return
-
-    sym      = pos["asset"]
-    side     = pos["side"]
-    token_id = pos["token_id"]
-    bid      = markets[sym]["up_bid"] if side == "UP" else markets[sym]["dn_bid"]
-
-    # Reintentar salida pendiente de ciclo anterior
-    if pos.get("salida_pendiente") and bid > 0:
-        log_event(f"Reintentando salida pendiente {side} {sym}...")
-    elif bid > STOP_LOSS_PRICE or bid <= 0:
-        return
-
-    # Verificar balance real en CLOB antes de vender
-    clob_bal = get_clob_balance(token_id)
-    shares_a_vender = clob_bal if clob_bal > 0 else pos["shares"]
-
-    log_event(f"STOP LOSS {side} {sym} @ bid={bid:.4f} | vendiendo {shares_a_vender} shares...")
-    approve_conditional_token(token_id)
-    result = place_taker_sell(token_id, shares_a_vender, bid)
-
-    if not result["success"]:
-        log_event(f"FALLO venta SL {side} {sym}: {result['error']} — reintentando próximo ciclo")
-        pos["salida_pendiente"] = True
-        write_state()
-        return
-
-    fill_price = result.get("fill_price") or bid
-    pnl        = round(shares_a_vender * fill_price - pos["entry_usd"], 6)
-    bt["capital"]   += pos["entry_usd"] + pnl
-    bt["total_pnl"] += pnl
-    bt["losses"]    += 1
-    update_drawdown()
-    log_event(f"STOP LOSS ejecutado {side} {sym} @ {fill_price:.4f} | PnL=${pnl:+.4f}")
-    _record_trade_sl(pos, fill_price, pnl)
-    bt["position"] = None
     write_state()
 
 
@@ -761,7 +718,6 @@ def _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl):
         "peer2_sym":        peers[1] if len(peers) > 1 else "",
         "peer2_side_mid":   round(p2_sm, 6),
         "peer2_opp_mid":    round(p2_om, 6),
-        "sl_price":         STOP_LOSS_PRICE,
         "exit_type":        exit_type,
         "exit_price":       round(exit_price, 6),
         "resolved":         resolved or "",
@@ -789,13 +745,6 @@ def _save_csv(record: dict):
 def _record_trade(pos, resolved, outcome, pnl):
     exit_price = 1.0 if resolved == pos["side"] else 0.0
     record = _build_trade_record(pos, "RESOLUTION", exit_price, resolved, outcome, pnl)
-    bt["trades"].append(record)
-    _save_csv(record)
-    _save_log()
-
-
-def _record_trade_sl(pos, exit_bid, pnl):
-    record = _build_trade_record(pos, "STOP_LOSS", exit_bid, None, "LOSS", pnl)
     bt["trades"].append(record)
     _save_csv(record)
     _save_log()
@@ -871,8 +820,6 @@ async def main_loop():
                 secs >= ENTRY_OPEN_SECS
             )
 
-            if bt["position"]:
-                check_stop_loss()
             if bt["position"]:
                 check_resolution()
 
