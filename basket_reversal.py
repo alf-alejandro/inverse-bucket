@@ -84,9 +84,9 @@ ENTRY_USD             = 1.75    # $1.75 fijo — garantiza ≥5 shares con ask �
 RESOLVED_UP_THRESH    = 0.98
 RESOLVED_DN_THRESH    = 0.02
 
-# Para la reversión usamos consenso SOFT: basta con que 1 par apoye el sesgo
+# Para la reversión usamos consenso SOFT: basta con que 1 par confirme el sesgo
 CONSENSUS_REQUIRED    = "SOFT"
-CONSENSUS_SOFT        = 0.55    # umbral para contar un par como "del mismo lado"
+CONSENSUS_SOFT        = 0.55    # peer del lado con gap debe estar > 0.55 para confirmar
 
 ENTRY_MAX_PRICE       = 0.40    # el lado contrario (favorecido) cotiza ~0.25–0.35 cuando gap > 11.5 bp
 
@@ -465,21 +465,23 @@ def compute_signals():
         bt["reversal_side"] = None
         return
 
-    # Consenso: los pares deben mostrar sesgo del lado sobre-extendido
-    # (si UP de SOL está muy bajo, los pares también deberían tener UP bajo)
+    # Consenso: cuando hay gap > 11.5bp en 1 activo, los pares suelen estar
+    # cerca de resolución (0.80-0.99). Eso CONFIRMA que el gap es real:
+    # el mercado ya casi resolvió en los pares, y el activo con gap está rezagado.
+    # Consenso SOFT = al menos 1 par tiene el lado del gap > 0.55 (confirma sesgo).
     asset = bt["signal_asset"]
     side  = bt["signal_side"]
     peers = [s for s in SYMBOLS if s != asset]
 
     if side == "UP":
         peer_vals = [markets[p]["up_mid"] for p in peers if markets[p]["up_mid"] > 0]
-        # "mismo sesgo" = pares también por debajo de 0.5 (bearish sobre UP)
-        below_half = [v for v in peer_vals if v < 0.5]
-        bt["consensus"] = "SOFT" if len(below_half) >= 1 else "NONE"
+        # Los pares deben confirmar sesgo UP (>0.55) — el activo con gap está rezagado
+        confirming = [v for v in peer_vals if v > CONSENSUS_SOFT]
+        bt["consensus"] = "SOFT" if len(confirming) >= 1 else "NONE"
     else:
         peer_vals = [markets[p]["dn_mid"] for p in peers if markets[p]["dn_mid"] > 0]
-        below_half = [v for v in peer_vals if v < 0.5]
-        bt["consensus"] = "SOFT" if len(below_half) >= 1 else "NONE"
+        confirming = [v for v in peer_vals if v > CONSENSUS_SOFT]
+        bt["consensus"] = "SOFT" if len(confirming) >= 1 else "NONE"
 
 
 # ═══════════════════════════════════════════════════════
