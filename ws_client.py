@@ -171,7 +171,8 @@ class MarketDataWS:
 
     def _on_open(self, ws, token_ids: list):
         ws.send(json.dumps({
-            "type":      "market",
+            "auth":       {},
+            "type":       "market",
             "assets_ids": token_ids,
         }))
         self._connected.set()
